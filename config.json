@@ -1,0 +1,15 @@
+{
+    "name": "我的音乐源",
+    "port": 6000,
+    "debug": false,
+    "platform": {
+        "name": "示例音乐平台",
+        "api_base": "https://api.example.com"
+    },
+    "features": {
+        "search": true,
+        "song_info": true,
+        "url": true,
+        "lyric": false
+    }
+}
