@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 LX Music Source Server - 音乐源服务器
-协议格式参考: https://github.com/lxmusics/lx-music-api-server
+对接: 咪咕音乐 (api.migu.cn)
 
 支持的接口:
 1. /search?keyword=关键词  - 搜索歌曲
@@ -14,46 +14,20 @@ LX Music Source Server - 音乐源服务器
 端口: 6000
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 import json
 import hashlib
 import time
+import requests
 
 app = Flask(__name__)
 
-# 模拟数据（替换为真实API调用）
-MOCK_SONGS = {
-    "1": {
-        "id": "1",
-        "title": "晴天",
-        "artist": "周杰伦",
-        "album": "叶惠美",
-        "duration": 267,
-        "pic": "https://example.com/cover/qingtian.jpg",
-        "url": "https://example.com/music/qingtian.mp3",
-        "lyric": "[00:00.00]词: 方文山 曲: 周杰伦\n[00:05.00]故事的小黄花"
-    },
-    "2": {
-        "id": "2",
-        "title": "夜曲",
-        "artist": "周杰伦",
-        "album": "十一月的萧邦",
-        "duration": 285,
-        "pic": "https://example.com/cover/yequ.jpg",
-        "url": "https://example.com/music/yequ.mp3",
-        "lyric": "[00:00.00]词: 方文山 曲: 周杰伦\n[00:05.00]一群嗜血的蚂蚁"
-    },
-    "3": {
-        "id": "3",
-        "title": "稻香",
-        "artist": "周杰伦",
-        "album": "稻香",
-        "duration": 235,
-        "pic": "https://example.com/cover/daoxiang.jpg",
-        "url": "https://example.com/music/daoxiang.mp3",
-        "lyric": "[00:00.00]词: 周杰伦 曲: 周杰伦\n[00:05.00]稻花香里说丰年"
-    }
-}
+# 缓存，用于存储搜索结果中的详细信息
+SEARCH_CACHE = {}
+
+# 咪咕音乐 API 配置
+MIGU_BASE = "https://migu.music.kspkg.cn"
+MIGUReferer = "https://m.music.migu.cn"
 
 
 def success_response(data):
@@ -73,15 +47,151 @@ def error_response(message, code=-1):
     })
 
 
+def sign_params(params):
+    """咪咕签名算法"""
+    """参考: https://github.com/moshuqi/ksmigu/blob/master/ksmigu/ksmigu.go#L88"""
+    # 咪咕的签名算法比较复杂，这里使用简化版本
+    # 实际使用时可能需要更完整的签名实现
+    return params
+
+
+def search_migu(keyword, page=1, limit=20):
+    """搜索咪咕音乐"""
+    global SEARCH_CACHE
+    
+    offset = (page - 1) * limit
+    
+    url = f"{MIGU_BASE}/search"
+    params = {
+        "keyword": keyword,
+        "type": 2,  # 歌曲
+        "limit": limit,
+        "offset": offset,
+        "raw": 1
+    }
+    
+    headers = {
+        "Referer": MIGUReferer,
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        data = response.json()
+        
+        if data.get("returnCode") != "000000":
+            return []
+        
+        results = []
+        songs = data.get("data", {}).get("result", []).get("songs", [])
+        
+        for song in songs:
+            # 构建缓存
+            song_id = str(song.get("id", ""))
+            artist = song.get("artist", [{}])[0].get("name", "未知艺术家") if song.get("artist") else "未知艺术家"
+            album = song.get("album", {})
+            album_name = album.get("name", "未知专辑") if album else "未知专辑"
+            duration = song.get("duration", 0)
+            pic = song.get("pic", "")
+            lyrics = song.get("lyrics", [])
+            
+            # 保存到缓存
+            SEARCH_CACHE[song_id] = {
+                "id": song_id,
+                "title": song.get("name", ""),
+                "artist": artist,
+                "album": album_name,
+                "duration": duration,
+                "pic": pic,
+                "lyrics": lyrics,
+                "url": "",  # 需要单独获取
+                "copyrightId": song.get("copyrightId", ""),
+                "source": "migu"
+            }
+            
+            results.append({
+                "id": song_id,
+                "title": song.get("name", ""),
+                "artist": artist,
+                "album": album_name,
+                "duration": duration,
+                "pic": pic,
+                "source": "migu"
+            })
+        
+        return results
+    except Exception as e:
+        print(f"搜索失败: {e}")
+        return []
+
+
+def get_url_migu(song_id):
+    """获取咪咕音乐播放链接"""
+    if song_id not in SEARCH_CACHE:
+        return None, 0
+    
+    song = SEARCH_CACHE[song_id]
+    copyright_id = song.get("copyrightId", "")
+    
+    if not copyright_id:
+        return None, 0
+    
+    url = f"{MIGU_BASE}/songdetail"
+    params = {
+        "copyrightId": copyright_id,
+        "raw": 1
+    }
+    
+    headers = {
+        "Referer": MIGUReferer,
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        data = response.json()
+        
+        if data.get("returnCode") != "000000":
+            return None, 0
+        
+        play_url = data.get("data", {}).get("playUrl", "")
+        
+        # 替换为 https
+        if play_url.startswith("http:"):
+            play_url = "https:" + play_url[5:]
+        
+        # 咪咕返回的是试听链接，可能需要验证
+        return play_url, 320
+    except Exception as e:
+        print(f"获取播放链接失败: {e}")
+        return None, 0
+
+
+def get_lyric_migu(song_id):
+    """获取咪咕音乐歌词"""
+    if song_id not in SEARCH_CACHE:
+        return ""
+    
+    song = SEARCH_CACHE[song_id]
+    lyrics = song.get("lyrics", [])
+    
+    # 合并所有歌词
+    full_lyric = ""
+    for lrc in lyrics:
+        full_lyric += lrc.get("content", "") + "\n"
+    
+    return full_lyric
+
+
 @app.route('/')
 def index():
     """源信息"""
     return jsonify({
-        "name": "我的音乐源",
+        "name": "咪咕音乐源",
         "author": "dc1626",
         "version": "1.0.0",
         "protocol": "2.0.0",
-        "description": "自定义音乐源服务器",
+        "description": "对接咪咕音乐 - api.migu.cn",
         "endpoints": {
             "search": "/search?keyword=关键词",
             "song": "/song?id=歌曲ID",
@@ -96,47 +206,17 @@ def search():
     """
     搜索歌曲
     GET /search?keyword=关键词&page=1&limit=20
-    
-    返回格式（LX Music协议）:
-    {
-      "success": true,
-      "data": [
-        {
-          "id": "歌曲ID",
-          "title": "歌名",
-          "artist": "艺术家",
-          "album": "专辑名",
-          "duration": 时长(秒),
-          "pic": "封面URL",
-          "source": "源标识"
-        }
-      ]
-    }
     """
+    global SEARCH_CACHE
+    
     keyword = request.args.get('keyword', '')
     page = int(request.args.get('page', 1))
     limit = int(request.args.get('limit', 20))
     
-    # TODO: 这里调用真实音乐平台的搜索API
-    # 示例：调用网易云音乐API
-    # response = requests.get(
-    #     "https://music.163.com/api/search/get",
-    #     params={"s": keyword, "type": 1, "limit": limit, "offset": (page-1)*limit}
-    # )
+    if not keyword:
+        return error_response("缺少关键词")
     
-    # 模拟搜索结果
-    results = []
-    for song_id, song in MOCK_SONGS.items():
-        if keyword.lower() in song['title'].lower() or keyword.lower() in song['artist'].lower():
-            results.append({
-                "id": song['id'],
-                "title": song['title'],
-                "artist": song['artist'],
-                "album": song['album'],
-                "duration": song['duration'],
-                "pic": song['pic'],
-                "source": "custom"
-            })
+    results = search_migu(keyword, page, limit)
     
     return success_response({
         "list": results,
@@ -151,31 +231,16 @@ def song_info():
     """
     获取歌曲详情
     GET /song?id=歌曲ID
-    
-    返回格式:
-    {
-      "success": true,
-      "data": {
-        "id": "歌曲ID",
-        "title": "歌名",
-        "artist": "艺术家",
-        "album": "专辑名",
-        "duration": 时长,
-        "pic": "封面URL",
-        "lyric": "歌词",
-        "tlyric": "翻译歌词",
-        "url": "播放链接"
-      }
-    }
     """
     song_id = request.args.get('id', '')
     
-    if song_id not in MOCK_SONGS:
-        return error_response("歌曲不存在")
+    if not song_id:
+        return error_response("缺少歌曲ID")
     
-    song = MOCK_SONGS[song_id]
+    if song_id not in SEARCH_CACHE:
+        return error_response("歌曲不存在，请先搜索")
     
-    # TODO: 调用真实平台的歌曲详情API
+    song = SEARCH_CACHE[song_id]
     
     return success_response({
         "id": song['id'],
@@ -184,10 +249,10 @@ def song_info():
         "album": song['album'],
         "duration": song['duration'],
         "pic": song['pic'],
-        "lyric": song.get('lyric', ''),
+        "lyric": song.get('lyrics', []),
         "tlyric": "",
-        "url": song.get('url', ''),
-        "source": "custom"
+        "url": "",
+        "source": "migu"
     })
 
 
@@ -196,31 +261,24 @@ def get_url():
     """
     获取播放链接
     GET /url?id=歌曲ID
-    
-    返回格式:
-    {
-      "success": true,
-      "data": {
-        "id": "歌曲ID",
-        "url": "音频URL",
-        "br": 比特率(kbps)
-      }
-    }
     """
     song_id = request.args.get('id', '')
     
-    if song_id not in MOCK_SONGS:
-        return error_response("歌曲不存在")
+    if not song_id:
+        return error_response("缺少歌曲ID")
     
-    song = MOCK_SONGS[song_id]
+    if song_id not in SEARCH_CACHE:
+        return error_response("歌曲不存在，请先搜索")
     
-    # TODO: 调用真实平台的播放链接API
-    # 例如：https://music.163.com/api/song/url?id={song_id}
+    url, br = get_url_migu(song_id)
+    
+    if not url:
+        return error_response("获取播放链接失败，可能是版权限制")
     
     return success_response({
-        "id": song['id'],
-        "url": song['url'],
-        "br": 320  # 比特率: 128/192/320
+        "id": song_id,
+        "url": url,
+        "br": br
     })
 
 
@@ -229,49 +287,43 @@ def get_lyric():
     """
     获取歌词
     GET /lyric?id=歌曲ID
-    
-    返回格式:
-    {
-      "success": true,
-      "data": {
-        "id": "歌曲ID",
-        "lyric": "原歌词",
-        "tlyric": "翻译歌词"
-      }
-    }
     """
     song_id = request.args.get('id', '')
     
-    if song_id not in MOCK_SONGS:
-        return error_response("歌曲不存在")
+    if not song_id:
+        return error_response("缺少歌曲ID")
     
-    song = MOCK_SONGS[song_id]
+    if song_id not in SEARCH_CACHE:
+        return error_response("歌曲不存在，请先搜索")
     
-    # TODO: 调用真实平台的歌词API
+    lyric = get_lyric_migu(song_id)
     
     return success_response({
         "id": song_id,
-        "lyric": song.get('lyric', ''),
+        "lyric": lyric,
         "tlyric": ""
     })
 
 
 @app.route('/pic')
 def get_pic():
-    """
-    获取封面图片
-    GET /pic?id=歌曲ID
-    """
+    """获取封面图片"""
     song_id = request.args.get('id', '')
     
-    if song_id not in MOCK_SONGS:
+    if not song_id:
+        return error_response("缺少歌曲ID")
+    
+    if song_id not in SEARCH_CACHE:
         return error_response("歌曲不存在")
     
-    song = MOCK_SONGS[song_id]
+    pic_url = SEARCH_CACHE[song_id].get('pic', '')
     
-    # 返回重定向到图片URL
-    from flask import redirect
-    return redirect(song['pic'], code=302)
+    if pic_url:
+        if pic_url.startswith("http:"):
+            pic_url = "https:" + pic_url[5:]
+        return redirect(pic_url, code=302)
+    
+    return error_response("封面不存在")
 
 
 @app.route('/check')
@@ -288,7 +340,7 @@ def check_update():
 if __name__ == '__main__':
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
-║         LX Music 源服务器 v1.0.0 - 启动中...              ║
+║         LX Music 咪咕音乐源服务器 v1.0.0 - 启动中...    ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  端口: 6000                                                  ║
 ║  地址: http://localhost:6000                                ║
@@ -306,7 +358,6 @@ if __name__ == '__main__':
 ╚══════════════════════════════════════════════════════════════════╝
 """)
     
-    # 从配置文件读取设置
     import os
     config_file = os.path.join(os.path.dirname(__file__), 'config.json')
     port = 6000
